@@ -59,14 +59,14 @@ export async function transcribe(audio, mime, fetchImpl = fetch) {
   return last;
 }
 
-const DAILY_LIMIT = Number(process.env.AI_DAILY_LIMIT ?? 30);
+export const DAILY_LIMIT = Number(process.env.AI_DAILY_LIMIT ?? 30);
 // Device ids are made up by the client, so a deployed proxy also caps each IP.
-const IP_DAILY_LIMIT = Number(process.env.AI_IP_DAILY_LIMIT ?? 150);
+export const IP_DAILY_LIMIT = Number(process.env.AI_IP_DAILY_LIMIT ?? 150);
 const MAX_BODY = 25 * 1024 * 1024; // receipt images (base64) and voice clips
 // ponytail: in-memory counter, resets on restart; use KV/DB once deployed
 const used = new Map();
 
-function overLimit(key, limit) {
+export function overLimit(key, limit) {
   const k = `${new Date().toISOString().slice(0, 10)}:${key}`;
   const n = (used.get(k) ?? 0) + 1;
   used.set(k, n);
