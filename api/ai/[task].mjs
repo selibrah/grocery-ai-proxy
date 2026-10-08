@@ -5,9 +5,18 @@ import { authorized, complete, overLimit, transcribe, DAILY_LIMIT, IP_DAILY_LIMI
 
 export const maxDuration = 60; // a week of dinners takes ~30 s
 
-const json = (status, body) => Response.json(body, { status });
+// Native apps send no Origin; allow only a local web build (expo start --web), as the local server does.
+const cors = (request) => {
+  const origin = request.headers.get('origin');
+  return origin && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    ? { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'content-type, x-device-id, x-app-token' }
+    : {};
+};
+
+export const OPTIONS = (request) => new Response(null, { status: 204, headers: cors(request) });
 
 export async function POST(request) {
+  const json = (status, body) => Response.json(body, { status, headers: cors(request) });
   const task = new URL(request.url).pathname.split('/').pop();
   if (!authorized(request.headers.get('x-app-token'))) return json(401, { error: 'unauthorized' });
   const device = request.headers.get('x-device-id');
