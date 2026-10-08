@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>AI Proxy Admin</title>
+<style>
+  :root {
+    --bg: #f6f7f5; --card: #fff; --ink: #18201b; --muted: #66706a; --line: #e2e6e3;
+    --accent: #1f7a4d; --accent-soft: #e3f2ea; --warn: #b45309; --bad: #b42318; --bad-soft: #fde8e7;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111513; --card: #191e1b; --ink: #e8ece9; --muted: #98a29c; --line: #2a312d;
+      --accent: #4cc38a; --accent-soft: #173326; --warn: #f0a44b; --bad: #f97066; --bad-soft: #3a1a18; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .muted { color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat .n { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; }
+  tr:last-child td { border-bottom: 0; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; background: var(--accent-soft); color: var(--accent); }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .pill.grey { background: var(--line); color: var(--muted); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; min-width: 80px; margin-top: 4px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .q { width: 170px; }
+  .bar.low > i { background: var(--warn); }
+  .bar.out > i { background: var(--bad); }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, button { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  input { min-width: 0; }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  button.danger { background: transparent; color: var(--bad); border-color: var(--line); padding: 4px 10px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .chart { display: flex; align-items: end; gap: 3px; height: 140px; }
+  .chart div { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; position: relative; }
+  .chart div.zero { background: var(--line); }
+  .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 6px; }
+  #msg { min-height: 20px; }
+  #msg.err { color: var(--bad); }
+  .hidden { display: none !important; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>AI Proxy Admin</h1>
+      <div class="muted" id="sub">Grocery Price Tracker · Groq + NVIDIA</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="range" aria-label="Period">
+        <option value="1">Today</option>
+        <option value="7" selected>7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+      </select>
+      <button class="ghost" id="refresh">Refresh</button>
+      <button class="ghost" id="logout">Sign out</button>
+    </div>
+  </header>
+
+  <form class="card" id="login">
+    <label style="flex:1">Admin token
+      <input id="token" type="password" autocomplete="current-password" required placeholder="ADMIN_TOKEN from Vercel">
+    </label>
+    <button>Open</button>
+  </form>
+
+  <div id="msg" role="status"></div>
+
+  <div id="app" class="hidden" style="display:grid;gap:16px">
+    <section class="stats" id="stats"></section>
+
+    <section class="card">
+      <h2>Requests per day</h2>
+      <div class="chart" id="chart"></div>
+      <div class="axis" id="axis"></div>
+    </section>
+
+    <section class="card">
+      <h2>API keys</h2>
+      <p class="muted" style="margin:0 0 12px">The proxy tries keys in this order. A key that hits its limit (429) or gets revoked (401) is skipped and the next one is used. Quota is what Groq reported on that key's last call.</p>
+      <div class="scroll"><table id="keys"></table></div>
+    </section>
+
+    <div class="grid2">
+      <section class="card">
+        <h2>Add an API key</h2>
+        <form id="addKey">
+          <label>Provider
+            <select name="provider"><option value="groq">Groq</option><option value="nvidia">NVIDIA</option></select>
+          </label>
+          <label style="flex:1;min-width:140px">Label
+            <input name="label" maxlength="60" placeholder="e.g. Ali's 2nd Groq account">
+          </label>
+          <label style="flex-basis:100%">Key
+            <input name="key" type="password" autocomplete="off" required minlength="20" placeholder="gsk_… or nvapi-…">
+          </label>
+          <button>Test &amp; add</button>
+        </form>
+        <p class="muted" style="margin:10px 0 0">Get keys at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> and <a href="https://build.nvidia.com" target="_blank" rel="noopener">build.nvidia.com</a>. The key is checked with a 1-token call before it is saved.</p>
+      </section>
+
+      <section class="card">
+        <h2>Usage limits</h2>
+        <form id="limits">
+          <label>Calls per device per day <input name="daily" type="number" min="1" required></label>
+          <label>Calls per IP per day <input name="ip" type="number" min="1" required></label>
+          <button>Save</button>
+        </form>
+        <p class="muted" style="margin:10px 0 0">Applies from the next request. Counters reset at midnight UTC.</p>
+      </section>
+    </div>
+
+    <div class="grid2">
+      <section class="card"><h2>By feature</h2><div class="scroll"><table id="tasks"></table></div></section>
+      <section class="card"><h2>By model</h2><div class="scroll"><table id="models"></table></div></section>
+    </div>
+
+    <section class="card">
+      <h2>Recent calls</h2>
+      <div class="scroll"><table id="log"></table></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const fmt = (n) => Number(n || 0).toLocaleString();
+const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : fmt(n));
+const TASKS = { draft: 'Price entry (draft)', chat: 'Assistant chat & meal plan', receipt: 'Receipt scan', transcribe: 'Voice input' };
+
+let token = '';
+try { token = sessionStorage.getItem('adminToken') || ''; } catch {}
+let data = null;
+
+function say(text, err) { $('msg').textContent = text || ''; $('msg').className = err ? 'err' : ''; }
+
+async function api(method, body) {
+  const res = await fetch('/api/admin', {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body && JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (res.status === 401) { signOut(); throw new Error('Wrong admin token'); }
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+function signOut() {
+  token = '';
+  try { sessionStorage.removeItem('adminToken'); } catch {}
+  $('app').classList.add('hidden'); $('login').classList.remove('hidden');
+}
+
+async function load() {
+  say('Loading…');
+  try {
+    data = await api('GET');
+    $('login').classList.add('hidden'); $('app').classList.remove('hidden');
+    render(); say('');
+  } catch (e) { say(e.message, true); }
+}
+
+function sumDays(days) {
+  const t = {};
+  for (const d of days) for (const [k, v] of Object.entries(d)) if (typeof v === 'number') t[k] = (t[k] || 0) + v;
+  return t;
+}
+
+function quota(rl, kind) {
+  const lim = Number(rl?.[`limit-${kind}`]), left = Number(rl?.[`remaining-${kind}`]);
+  if (!lim || Number.isNaN(left)) return '<span class="muted">—</span>';
+  const pct = Math.max(0, Math.min(100, (left / lim) * 100));
+  const cls = pct === 0 ? 'out' : pct < 20 ? 'low' : '';
+  const reset = rl[`reset-${kind}`] ? ` · resets in ${esc(rl[`reset-${kind}`])}` : '';
+  const text = `${short(left)} / ${short(lim)} left`;
+  return `<div class="q"><span${pct === 0 ? ' style="color:var(--bad)"' : ''}>${text}</span><div class="bar ${cls}"><i style="width:${pct}%"></i></div><span class="muted" style="font-size:11px">${kind === 'requests' ? 'per day' : 'per minute'}${reset}</span></div>`;
+}
+
+function render() {
+  const range = Number($('range').value);
+  const days = data.days.slice(-range);
+  const t = sumDays(days);
+  const today = data.days.at(-1);
+  const calls = t.req || 0;
+  const ok = calls - (t.fail || 0) - (t.blocked || 0);
+
+  $('stats').innerHTML = [
+    ['App requests', fmt(calls), range === 1 ? 'today' : `last ${range} days`],
+    ['Tokens used', short(t.tok || 0), `${fmt(t.tok || 0)} tokens`],
+    ['Active devices today', fmt(today.devices), `${fmt(Math.max(...days.map((d) => d.devices)))} max/day in period`],
+    ['Success rate', calls ? Math.round((ok / calls) * 100) + '%' : '—', `${fmt(t.fail || 0)} failed`],
+    ['Blocked by limits', fmt(t.blocked || 0), `${data.limits.daily}/device · ${data.limits.ip}/IP per day`],
+  ].map(([l, n, s]) => `<div class="card stat"><div class="l">${l}</div><div class="n">${n}</div><div class="muted">${s}</div></div>`).join('');
+
+  const max = Math.max(1, ...days.map((d) => d.req || 0));
+  $('chart').innerHTML = days.map((d) =>
+    `<div class="${d.req ? '' : 'zero'}" style="height:${((d.req || 0) / max) * 100}%" title="${d.date}: ${fmt(d.req)} requests, ${fmt(d.tok)} tokens, ${fmt(d.devices)} devices"></div>`).join('');
+  $('axis').innerHTML = `<span>${days[0].date}</span><span>max ${fmt(max)}/day</span><span>${days.at(-1).date}</span>`;
+
+  $('keys').innerHTML = `<tr><th>#</th><th>Provider</th><th>Label</th><th>Key</th><th class="num">Calls</th><th class="num">Tokens</th><th class="num">Errors</th><th>Quota per model (requests · tokens)</th><th></th></tr>` +
+    data.keys.map((k, i) => {
+      const rates = Object.entries(data.rateLimits).filter(([id]) => id.startsWith(k.id + '|'));
+      const q = rates.length
+        ? rates.map(([id, rl]) => `<div style="margin-bottom:6px"><code>${esc(id.split('|')[1])}</code><div style="display:flex;gap:20px">${quota(rl, 'requests')}${quota(rl, 'tokens')}</div></div>`).join('')
+        : `<span class="muted">${k.provider === 'groq' ? 'no calls yet' : 'not reported by NVIDIA'}</span>`;
+      const errs = t[`key:${k.id}:err`] || 0;
+      return `<tr><td>${i + 1}</td><td><span class="pill ${k.provider === 'groq' ? '' : 'grey'}">${esc(k.provider)}</span></td>
+        <td>${esc(k.label)}<div class="muted" style="font-size:11px">${k.source === 'env' ? 'Vercel env var' : 'added ' + new Date(k.added).toLocaleDateString()}</div></td>
+        <td><code>${esc(k.masked)}</code></td><td class="num">${fmt(t[`key:${k.id}:req`])}</td><td class="num">${short(t[`key:${k.id}:tok`] || 0)}</td>
+        <td class="num">${errs ? `<span class="pill bad">${fmt(errs)}</span>` : 0}</td><td>${q}</td>
+        <td>${k.source === 'admin' ? `<button class="danger" data-del="${esc(k.id)}" data-label="${esc(k.label)}">Remove</button>` : ''}</td></tr>`;
+    }).join('');
+
+  const rows = (prefix) => Object.keys(t).filter((k) => k.startsWith(prefix) && k.endsWith(':req')).map((k) => k.slice(prefix.length, -4));
+  const tasks = Object.keys(t).filter((k) => k.startsWith('task:')).map((k) => k.slice(5)).sort((a, b) => t['task:' + b] - t['task:' + a]);
+  $('tasks').innerHTML = `<tr><th>Feature</th><th class="num">Requests</th><th class="num">Share</th></tr>` +
+    (tasks.map((k) => `<tr><td>${esc(TASKS[k] || k)}</td><td class="num">${fmt(t['task:' + k])}</td><td class="num">${calls ? Math.round((t['task:' + k] / calls) * 100) : 0}%</td></tr>`).join('') || '<tr><td class="muted">No requests yet</td></tr>');
+  const models = rows('model:').sort((a, b) => t[`model:${b}:tok`] - t[`model:${a}:tok`]);
+  $('models').innerHTML = `<tr><th>Model</th><th class="num">Calls</th><th class="num">Tokens</th><th class="num">Avg / call</th></tr>` +
+    (models.map((m) => { const c = t[`model:${m}:req`], k = t[`model:${m}:tok`] || 0;
+      return `<tr><td><code>${esc(m)}</code></td><td class="num">${fmt(c)}</td><td class="num">${short(k)}</td><td class="num">${fmt(Math.round(k / c))}</td></tr>`; }).join('') || '<tr><td class="muted">No calls yet</td></tr>');
+
+  $('log').innerHTML = `<tr><th>Time</th><th>Feature</th><th>Result</th><th>Tries (key · model · status · tokens · time)</th></tr>` +
+    (data.log.map((l) => {
+      const st = l.status === 'blocked' ? '<span class="pill bad">blocked</span>' : `<span class="pill ${l.status < 400 ? '' : 'bad'}">${esc(l.status)}</span>`;
+      const tries = l.tries.map((x) => `<div><code>${esc(x.keyId)}</code> · <code>${esc(x.model)}</code> · ${esc(x.status)} · ${fmt(x.tokens)} tok · ${(x.ms / 1000).toFixed(1)} s</div>`).join('') || '<span class="muted">—</span>';
+      return `<tr><td>${new Date(l.at).toLocaleString()}</td><td>${esc(TASKS[l.task] || l.task)}</td><td>${st}</td><td>${tries}</td></tr>`;
+    }).join('') || '<tr><td class="muted">No calls yet</td></tr>');
+
+  const f = $('limits');
+  if (!(document.activeElement?.tagName === 'INPUT' && f.contains(document.activeElement))) { f.daily.value = data.limits.daily; f.ip.value = data.limits.ip; }
+}
+
+async function submit(form, body, done) {
+  const btn = form.querySelector('button'); btn.disabled = true;
+  try { await api('POST', body); if (form.id === 'addKey') form.reset(); await load(); say(done); }
+  catch (e) { say(e.message, true); }
+  finally { btn.disabled = false; }
+}
+
+$('login').addEventListener('submit', (e) => {
+  e.preventDefault();
+  token = $('token').value.trim();
+  try { sessionStorage.setItem('adminToken', token); } catch {}
+  load();
+});
+$('logout').onclick = signOut;
+$('refresh').onclick = load;
+$('range').onchange = () => data && render();
+$('addKey').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = e.target;
+  say('Testing the key…');
+  submit(f, { action: 'addKey', provider: f.provider.value, label: f.label.value, key: f.key.value }, 'Key added.');
+});
+$('limits').addEventListener('submit', (e) => {
+  e.preventDefault();
+  submit(e.target, { action: 'setLimits', daily: e.target.daily.value, ip: e.target.ip.value }, 'Limits saved.');
+});
+$('keys').addEventListener('click', async (e) => {
+  const id = e.target.dataset?.del;
+  if (!id || !confirm(`Remove key "${e.target.dataset.label}"? The proxy stops using it right away.`)) return;
+  try { await api('POST', { action: 'deleteKey', id }); await load(); say('Key removed.'); } catch (err) { say(err.message, true); }
+});
+
+if (token) load();
+setInterval(() => token && !document.hidden && load(), 60000);
+</script>
+</body>
+</html>

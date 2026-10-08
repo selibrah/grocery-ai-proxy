@@ -5,34 +5,66 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const GROQ = { url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY };
-const NVIDIA = { url: 'https://integrate.api.nvidia.com/v1/chat/completions', key: process.env.NVIDIA_API_KEY };
+export const PROVIDERS = {
+  groq: { url: 'https://api.groq.com/openai/v1/chat/completions', env: 'GROQ_API_KEY' },
+  nvidia: { url: 'https://integrate.api.nvidia.com/v1/chat/completions', env: 'NVIDIA_API_KEY' },
+};
+
+/** Keys from the environment; the deployed proxy adds the ones saved from the admin page. */
+export function envKeys() {
+  return Object.fromEntries(
+    Object.entries(PROVIDERS).map(([name, p]) => [name, process.env[p.env] ? [{ id: `${name}-env`, key: process.env[p.env] }] : []])
+  );
+}
 
 // Attempts in order. NVIDIA free tier is dev/beta only (see docs/design/stitch/REPORT.md §8.6).
 export const ROUTES = {
-  draft: [[GROQ, 'openai/gpt-oss-20b'], [NVIDIA, 'openai/gpt-oss-20b']],
-  chat: [[GROQ, 'openai/gpt-oss-120b'], [NVIDIA, 'openai/gpt-oss-20b']],
-  receipt: [[GROQ, 'qwen/qwen3.8-27b']],
+  draft: [['groq', 'openai/gpt-oss-20b'], ['nvidia', 'openai/gpt-oss-20b']],
+  chat: [['groq', 'openai/gpt-oss-120b'], ['nvidia', 'openai/gpt-oss-20b']],
+  receipt: [['groq', 'qwen/qwen3.8-27b']],
 };
 
-export async function complete(task, body, fetchImpl = fetch) {
-  const routes = ROUTES[task];
-  if (!routes) return { status: 400, json: { error: `unknown task: ${task}` } };
-  let last;
-  for (const [provider, model] of routes) {
-    try {
-      const res = await fetchImpl(provider.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.key}` },
-        body: JSON.stringify({ ...body, model, stream: false }),
-      });
-      last = { status: res.status, json: await res.json() };
-      if (res.status !== 429 && res.status < 500) return last;
-    } catch (e) {
-      last = { status: 502, json: { error: String(e) } };
+// Groq reports what is left of each key's quota on every response.
+const LIMIT_HEADERS = ['limit-requests', 'remaining-requests', 'reset-requests', 'limit-tokens', 'remaining-tokens', 'reset-tokens'];
+const readLimits = (res) => {
+  const out = Object.fromEntries(LIMIT_HEADERS.flatMap((h) => (res.headers?.get?.(`x-ratelimit-${h}`) ? [[h, res.headers.get(`x-ratelimit-${h}`)]] : [])));
+  return Object.keys(out).length ? out : undefined;
+};
+
+// Every key of a provider gets a turn before moving on: a 429 means that key is spent, a
+// 401/403 means it was revoked. Returns the reply plus one entry per try, for the stats.
+async function attempt(tries, keys, send, fetchImpl) {
+  const attempts = [];
+  let last = { status: 503, json: { error: 'no API key configured' } };
+  for (const [provider, model] of tries) {
+    for (const { id, key } of keys[provider] ?? []) {
+      const t0 = Date.now();
+      try {
+        const res = await fetchImpl(...send(provider, model, key));
+        last = { status: res.status, json: await res.json() };
+        attempts.push({ provider, keyId: id, model, status: res.status, tokens: last.json?.usage?.total_tokens ?? 0, ms: Date.now() - t0, limits: readLimits(res) });
+        if (![401, 403, 429].includes(res.status) && res.status < 500) return { ...last, attempts };
+      } catch (e) {
+        last = { status: 502, json: { error: String(e) } };
+        attempts.push({ provider, keyId: id, model, status: 502, tokens: 0, ms: Date.now() - t0 });
+      }
     }
   }
-  return last;
+  return { ...last, attempts };
+}
+
+export function complete(task, body, fetchImpl = fetch, keys = envKeys()) {
+  const routes = ROUTES[task];
+  if (!routes) return Promise.resolve({ status: 400, json: { error: `unknown task: ${task}` }, attempts: [] });
+  const send = (provider, model, key) => [
+    PROVIDERS[provider].url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ ...body, model, stream: false }),
+    },
+  ];
+  return attempt(routes, keys, send, fetchImpl);
 }
 
 const WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
@@ -40,30 +72,23 @@ const WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const WHISPER_PROMPT = 'lait 7 dh Marjane, sokkar 9 drahm f BIM, حليب سنطرال 7 دراهم, زيت لوسيور 24 درهم, huile Lesieur 24,50.';
 
 // Audio arrives as the raw request body; Groq wants multipart.
-export async function transcribe(audio, mime, fetchImpl = fetch) {
-  let last;
-  for (const model of ['whisper-large-v3-turbo', 'whisper-large-v3']) {
+export function transcribe(audio, mime, fetchImpl = fetch, keys = envKeys()) {
+  const send = (_, model, key) => {
     const form = new FormData();
     form.append('file', new Blob([audio], { type: mime }), `audio.${mime.split('/')[1]?.split(';')[0] || 'm4a'}`);
     form.append('model', model);
     form.append('prompt', WHISPER_PROMPT);
     form.append('response_format', 'json');
-    try {
-      const res = await fetchImpl(WHISPER_URL, { method: 'POST', headers: { Authorization: `Bearer ${GROQ.key}` }, body: form });
-      last = { status: res.status, json: await res.json() };
-      if (res.status !== 429 && res.status < 500) return last;
-    } catch (e) {
-      last = { status: 502, json: { error: String(e) } };
-    }
-  }
-  return last;
+    return [WHISPER_URL, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form }];
+  };
+  return attempt([['groq', 'whisper-large-v3-turbo'], ['groq', 'whisper-large-v3']], keys, send, fetchImpl);
 }
 
 export const DAILY_LIMIT = Number(process.env.AI_DAILY_LIMIT ?? 30);
 // Device ids are made up by the client, so a deployed proxy also caps each IP.
 export const IP_DAILY_LIMIT = Number(process.env.AI_IP_DAILY_LIMIT ?? 150);
 const MAX_BODY = 25 * 1024 * 1024; // receipt images (base64) and voice clips
-// ponytail: in-memory counter, resets on restart; use KV/DB once deployed
+// ponytail: in-memory counter for local dev; the deployed proxy counts in Redis (store.mjs)
 const used = new Map();
 
 export function overLimit(key, limit) {
@@ -131,7 +156,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (!GROQ.key || !NVIDIA.key) throw new Error('GROQ_API_KEY and NVIDIA_API_KEY must be set in .env');
+  if (!process.env.GROQ_API_KEY || !process.env.NVIDIA_API_KEY) throw new Error('GROQ_API_KEY and NVIDIA_API_KEY must be set in .env');
   const port = Number(process.env.PORT ?? 8787);
   const host = process.env.HOST ?? '127.0.0.1'; // HOST=0.0.0.0 when deployed, or for a phone on your Wi-Fi
   server.listen(port, host, () => console.log(`AI proxy on http://${host}:${port}`));

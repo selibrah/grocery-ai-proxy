@@ -1,7 +1,7 @@
 // Vercel entry point: same checks as the local server in ai-proxy.mjs, as a Web-standard handler.
-// ponytail: limits live in each function instance's memory, so cold starts reset them and
-// instances don't share them; move the counter to Upstash/Vercel KV if strangers hammer it.
-import { authorized, complete, overLimit, transcribe, DAILY_LIMIT, IP_DAILY_LIMIT } from '../../ai-proxy.mjs';
+// Limits, extra keys and stats live in Redis (store.mjs); the admin page reads them back.
+import { authorized, complete, transcribe } from '../../ai-proxy.mjs';
+import { keys, overLimits, record } from '../../store.mjs';
 
 export const maxDuration = 60; // a week of dinners takes ~30 s
 
@@ -23,12 +23,15 @@ export async function POST(request) {
   if (!device) return json(400, { error: 'x-device-id header required' });
   // Vercel sets x-real-ip to the caller's address; clients can't spoof it.
   const ip = request.headers.get('x-real-ip') ?? 'unknown';
-  if (overLimit(`ip:${ip}`, IP_DAILY_LIMIT) || overLimit(device, DAILY_LIMIT)) {
+  if (await overLimits(device, ip)) {
+    await record(task, 'blocked', [], device);
     return json(429, { error: 'daily limit reached' });
   }
+  const pool = await keys();
   if (task === 'transcribe') {
     const audio = Buffer.from(await request.arrayBuffer());
-    const out = await transcribe(audio, request.headers.get('content-type') || 'audio/m4a');
+    const out = await transcribe(audio, request.headers.get('content-type') || 'audio/m4a', fetch, pool);
+    await record(task, out.status, out.attempts, device);
     return json(out.status, out.json);
   }
   let body;
@@ -37,6 +40,7 @@ export async function POST(request) {
   } catch {
     return json(400, { error: 'invalid JSON' });
   }
-  const out = await complete(task, body);
+  const out = await complete(task, body, fetch, pool);
+  await record(task, out.status, out.attempts, device);
   return json(out.status, out.json);
 }
