@@ -1,0 +1,10 @@
+{
+  "name": "grocery-ai-proxy",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node ai-proxy.mjs",
+    "test": "node --test ai-proxy.test.mjs"
+  }
+}
