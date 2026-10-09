@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorized, complete, transcribe } from './ai-proxy.mjs';
+import net from 'node:net';
+import { authorized, complete, server, transcribe } from './ai-proxy.mjs';
 
 const reply = (status) => ({ status, json: async () => ({ status }) });
 const KEYS = { groq: [{ id: 'g1', key: 'a' }], nvidia: [{ id: 'n1', key: 'b' }] };
@@ -17,11 +18,36 @@ test('falls back to NVIDIA when Groq returns 429', async () => {
   assert.match(calls[1][0], /nvidia/);
 });
 
+test('skips NVIDIA when NVIDIA_API_KEY is unset', async () => {
+  const urls = [];
+  const out = await complete('chat', { messages: [] }, async (url) => (urls.push(url), reply(429)), { groq: [{ id: 'g1', key: 'a' }], nvidia: [] });
+  assert.equal(out.status, 429);
+  assert.ok(urls.length > 0 && urls.every((u) => /groq/.test(u)));
+});
+
 test('does not retry on a 400 from Groq', async () => {
   let n = 0;
   const out = await complete('chat', { messages: [] }, async () => (n++, reply(400)), KEYS);
   assert.equal(out.status, 400);
   assert.equal(n, 1);
+});
+
+test('forwards only the fields the app uses and caps max_tokens', async () => {
+  let sent;
+  const fn = { type: 'function', function: { name: 'search_products', parameters: { type: 'object' } } };
+  await complete(
+    'chat',
+    { messages: [], tools: [fn, { type: 'browser_search' }, { type: 'code_interpreter' }], max_tokens: 1e6, n: 8, service_tier: 'flex', model: 'other', stream: true },
+    async (url, init) => ((sent = JSON.parse(init.body)), reply(200)),
+    KEYS
+  );
+  assert.deepEqual(Object.keys(sent).sort(), ['max_tokens', 'messages', 'model', 'stream', 'tools']);
+  assert.deepEqual(sent.tools, [fn]); // Groq's built-in tools are not offered
+  assert.equal(sent.max_tokens, 8000);
+  assert.equal(sent.model, 'openai/gpt-oss-120b');
+  assert.equal(sent.stream, false);
+  await complete('chat', { messages: [], max_tokens: 2000 }, async (url, init) => ((sent = JSON.parse(init.body)), reply(200)), KEYS);
+  assert.equal(sent.max_tokens, 2000);
 });
 
 test('rejects unknown tasks', async () => {
@@ -80,4 +106,24 @@ test('passes an unparseable JSON reply up the ladder, signing tool calls for Gem
   assert.match(sent[0][0], /generativelanguage/);
   assert.equal(sent[0][1].messages[0].tool_calls[0].extra_content.google.thought_signature, 'skip_thought_signature_validator');
   assert.equal(sent[1][1].messages[0].tool_calls[0].extra_content, undefined); // Groq gets the app's calls as they are
+});
+
+test('survives a client that aborts mid-upload', async () => {
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    await new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1', () => {
+        socket.write('POST /ai/chat HTTP/1.1\r\nHost: x\r\nx-device-id: abort-test\r\n');
+        socket.write('Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n{"messages":');
+        setTimeout(() => (socket.destroy(), resolve()), 50);
+      });
+      socket.on('error', reject);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(res.status, 404); // still serving
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

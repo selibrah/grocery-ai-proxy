@@ -1,5 +1,6 @@
 // Local AI proxy: holds the API keys so the app never does.
 // Picks a model ladder per task (Groq, Gemini, NVIDIA), falls back on 429/5xx, caps requests per device.
+// NVIDIA is optional: its free API is trial-only, so leave NVIDIA_API_KEY unset in production.
 // Run: yarn ai-proxy   (reads .env)
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
@@ -84,6 +85,23 @@ async function attempt(tries, keys, send, fetchImpl, usable = () => true) {
   return { ...last, attempts };
 }
 
+// The app token ships inside the app, so anyone holding it can call this endpoint: forward
+// only the fields the app sends, and cap the answer (the meal plan asks the most, 8000).
+// Only function tools: Groq's built-in ones (browser_search, code_interpreter) run on our key.
+const MAX_TOKENS = 8000;
+const forward = (body) => {
+  const { messages, tools, tool_choice, response_format, reasoning_effort, max_tokens } = body ?? {};
+  const functions = Array.isArray(tools) ? tools.filter((t) => t?.type === 'function') : [];
+  return {
+    messages,
+    tools: functions.length ? functions : undefined,
+    tool_choice,
+    response_format,
+    reasoning_effort,
+    max_tokens: Math.min(Number(max_tokens) || MAX_TOKENS, MAX_TOKENS),
+  };
+};
+
 export function complete(task, body, fetchImpl = fetch, keys = envKeys()) {
   const routes = ROUTES[task];
   if (!routes) return Promise.resolve({ status: 400, json: { error: `unknown task: ${task}` }, attempts: [] });
@@ -92,7 +110,7 @@ export function complete(task, body, fetchImpl = fetch, keys = envKeys()) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ ...body, ...(provider === 'gemini' && { messages: signCalls(body.messages) }), model, stream: false }),
+      body: JSON.stringify({ ...forward(body), ...(provider === 'gemini' && { messages: signCalls(body?.messages) }), model, stream: false }),
     },
   ];
   return attempt(routes, keys, send, fetchImpl, usableFor(body));
@@ -146,7 +164,7 @@ function send(res, status, json) {
   res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(json));
 }
 
-const server = http.createServer(async (req, res) => {
+async function handle(req, res) {
   // Native apps send no Origin; allow only the local web build (expo start --web).
   const origin = req.headers.origin;
   if (origin && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
@@ -184,10 +202,20 @@ const server = http.createServer(async (req, res) => {
   }
   const out = await complete(task, body);
   send(res, out.status, out.json);
+}
+
+// A client that drops mid-upload makes `for await (req)` reject with 'aborted'. Unhandled,
+// that rejection exits the process (every in-flight request and the limit counters with it).
+export const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    console.warn('Request failed:', e?.code ?? e?.message ?? e);
+    if (!res.headersSent && !res.destroyed) send(res, 500, { error: 'failed' });
+    else res.destroy();
+  });
 });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (!process.env.GROQ_API_KEY || !process.env.NVIDIA_API_KEY) throw new Error('GROQ_API_KEY and NVIDIA_API_KEY must be set in .env');
+  if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY must be set in .env (Gemini and NVIDIA are optional fallbacks)');
   const port = Number(process.env.PORT ?? 8787);
   const host = process.env.HOST ?? '127.0.0.1'; // HOST=0.0.0.0 when deployed, or for a phone on your Wi-Fi
   server.listen(port, host, () => console.log(`AI proxy on http://${host}:${port}`));
