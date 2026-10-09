@@ -107,7 +107,7 @@
         <h2>Add an API key</h2>
         <form id="addKey">
           <label>Provider
-            <select name="provider"><option value="groq">Groq</option><option value="nvidia">NVIDIA</option></select>
+            <select name="provider"><option value="groq">Groq</option><option value="gemini">Gemini</option><option value="nvidia">NVIDIA</option></select>
           </label>
           <label style="flex:1;min-width:140px">Label
             <input name="label" maxlength="60" placeholder="e.g. Ali's 2nd Groq account">
@@ -117,7 +117,7 @@
           </label>
           <button>Test &amp; add</button>
         </form>
-        <p class="muted" style="margin:10px 0 0">Get keys at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> and <a href="https://build.nvidia.com" target="_blank" rel="noopener">build.nvidia.com</a>. The key is checked with a 1-token call before it is saved.</p>
+        <p class="muted" style="margin:10px 0 0">Get keys at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and <a href="https://build.nvidia.com" target="_blank" rel="noopener">build.nvidia.com</a>. The key is checked with a 1-token call before it is saved.</p>
       </section>
 
       <section class="card">
@@ -225,7 +225,7 @@ function render() {
       const rates = Object.entries(data.rateLimits).filter(([id]) => id.startsWith(k.id + '|'));
       const q = rates.length
         ? rates.map(([id, rl]) => `<div style="margin-bottom:6px"><code>${esc(id.split('|')[1])}</code><div style="display:flex;gap:20px">${quota(rl, 'requests')}${quota(rl, 'tokens')}</div></div>`).join('')
-        : `<span class="muted">${k.provider === 'groq' ? 'no calls yet' : 'not reported by NVIDIA'}</span>`;
+        : `<span class="muted">${k.provider === 'groq' ? 'no calls yet' : `not reported by ${k.provider === 'gemini' ? 'Gemini' : 'NVIDIA'}`}</span>`;
       const errs = t[`key:${k.id}:err`] || 0;
       return `<tr><td>${i + 1}</td><td><span class="pill ${k.provider === 'groq' ? '' : 'grey'}">${esc(k.provider)}</span></td>
         <td>${esc(k.label)}<div class="muted" style="font-size:11px">${k.source === 'env' ? 'Vercel env var' : 'added ' + new Date(k.added).toLocaleDateString()}</div></td>

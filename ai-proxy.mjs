@@ -1,5 +1,5 @@
 // Local AI proxy: holds the API keys so the app never does.
-// Picks a model per task, falls back Groq -> NVIDIA on 429/5xx, caps requests per device.
+// Picks a model ladder per task (Groq, Gemini, NVIDIA), falls back on 429/5xx, caps requests per device.
 // Run: yarn ai-proxy   (reads .env)
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 export const PROVIDERS = {
   groq: { url: 'https://api.groq.com/openai/v1/chat/completions', env: 'GROQ_API_KEY' },
   nvidia: { url: 'https://integrate.api.nvidia.com/v1/chat/completions', env: 'NVIDIA_API_KEY' },
+  gemini: { url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', env: 'GEMINI_API_KEY' },
 };
 
 /** Keys from the environment; the deployed proxy adds the ones saved from the admin page. */
@@ -17,11 +18,36 @@ export function envKeys() {
   );
 }
 
-// Attempts in order. NVIDIA free tier is dev/beta only (see docs/design/stitch/REPORT.md §8.6).
+// Attempts in order: the free model best at the job first, then the rest. Free quotas are
+// per model, so a second model of the same provider is more free capacity, not a retry.
+// NVIDIA's free tier is dev/beta only (see docs/design/stitch/REPORT.md §8.6), so it comes last.
+// ponytail: fixed ladders; reorder from the admin page's stats if one provider runs dry.
 export const ROUTES = {
-  draft: [['groq', 'openai/gpt-oss-20b'], ['nvidia', 'openai/gpt-oss-20b']],
-  chat: [['groq', 'openai/gpt-oss-120b'], ['nvidia', 'openai/gpt-oss-20b']],
-  receipt: [['groq', 'qwen/qwen3.8-27b']],
+  // Short tool-calling turns: Groq answers fastest; Gemini Lite covers its rate limits.
+  chat: [['groq', 'openai/gpt-oss-120b'], ['gemini', 'gemini-3.5-flash-lite'], ['groq', 'openai/gpt-oss-20b'], ['nvidia', 'openai/gpt-oss-20b']],
+  // Long JSON (recipes, a week of dinners): Groq's per-minute token cap is the first to trip.
+  plan: [['gemini', 'gemini-3.5-flash'], ['groq', 'openai/gpt-oss-120b'], ['gemini', 'gemini-3.5-flash-lite'], ['nvidia', 'openai/gpt-oss-20b']],
+  // Photos: Gemini reads dense Arabic/French receipts best; Groq's vision model backs it up.
+  receipt: [['gemini', 'gemini-3.5-flash'], ['groq', 'qwen/qwen3.8-27b'], ['gemini', 'gemini-3.5-flash-lite']],
+  draft: [['groq', 'openai/gpt-oss-20b'], ['gemini', 'gemini-3.5-flash-lite'], ['nvidia', 'openai/gpt-oss-20b']],
+};
+
+// Gemini 3 wants a thought signature on every earlier tool call. Calls another model wrote
+// (or the app rebuilt) have none, so they get Google's documented placeholder.
+const SKIP_SIGNATURE = { google: { thought_signature: 'skip_thought_signature_validator' } };
+const signCalls = (messages) =>
+  messages?.map((m) => (m.tool_calls ? { ...m, tool_calls: m.tool_calls.map((c) => ({ extra_content: SKIP_SIGNATURE, ...c })) } : m));
+
+// The models check each other: a JSON-mode reply that doesn't parse (cut off at max_tokens,
+// or prose) goes up the ladder instead of back to the app.
+const usableFor = (body) => (json) => {
+  if (body?.response_format?.type !== 'json_object') return true;
+  try {
+    JSON.parse(json?.choices?.[0]?.message?.content);
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 // Groq reports what is left of each key's quota on every response.
@@ -32,17 +58,22 @@ const readLimits = (res) => {
 };
 
 // Every key of a provider gets a turn before moving on: a 429 means that key is spent, a
-// 401/403 means it was revoked. Returns the reply plus one entry per try, for the stats.
-async function attempt(tries, keys, send, fetchImpl) {
+// 401/403 means it was revoked; an unusable reply (status 422 in the stats) skips to the next
+// model. Returns the reply plus one entry per try, for the stats.
+async function attempt(tries, keys, send, fetchImpl, usable = () => true) {
   const attempts = [];
   let last = { status: 503, json: { error: 'no API key configured' } };
-  for (const [provider, model] of tries) {
+  ladder: for (const [provider, model] of tries) {
     for (const { id, key } of keys[provider] ?? []) {
       const t0 = Date.now();
       try {
         const res = await fetchImpl(...send(provider, model, key));
         last = { status: res.status, json: await res.json() };
         attempts.push({ provider, keyId: id, model, status: res.status, tokens: last.json?.usage?.total_tokens ?? 0, ms: Date.now() - t0, limits: readLimits(res) });
+        if (res.ok && !usable(last.json)) {
+          attempts.at(-1).status = 422;
+          continue ladder;
+        }
         if (![401, 403, 429].includes(res.status) && res.status < 500) return { ...last, attempts };
       } catch (e) {
         last = { status: 502, json: { error: String(e) } };
@@ -61,10 +92,10 @@ export function complete(task, body, fetchImpl = fetch, keys = envKeys()) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ ...body, model, stream: false }),
+      body: JSON.stringify({ ...body, ...(provider === 'gemini' && { messages: signCalls(body.messages) }), model, stream: false }),
     },
   ];
-  return attempt(routes, keys, send, fetchImpl);
+  return attempt(routes, keys, send, fetchImpl, usableFor(body));
 }
 
 const WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';

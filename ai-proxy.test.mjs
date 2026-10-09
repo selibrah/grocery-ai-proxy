@@ -62,3 +62,22 @@ test('tries every key of a provider before falling back, and reports each try', 
   assert.deepEqual(out.attempts[2].limits, { 'remaining-requests': '13' });
   assert.equal((await complete('draft', {}, fetch, { groq: [], nvidia: [] })).status, 503);
 });
+
+test('passes an unparseable JSON reply up the ladder, signing tool calls for Gemini', async () => {
+  const sent = [];
+  const keys = { groq: [{ id: 'g1', key: 'a' }], gemini: [{ id: 'm1', key: 'c' }], nvidia: [] };
+  const body = {
+    response_format: { type: 'json_object' },
+    messages: [{ role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] }],
+  };
+  const out = await complete('plan', body, async (url, init) => {
+    sent.push([url, JSON.parse(init.body)]);
+    const content = sent.length === 1 ? '{"days": [' : '{"days": []}'; // the first is cut off
+    return { status: 200, ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
+  }, keys);
+  assert.equal(out.status, 200);
+  assert.deepEqual(out.attempts.map((a) => [a.keyId, a.status]), [['m1', 422], ['g1', 200]]);
+  assert.match(sent[0][0], /generativelanguage/);
+  assert.equal(sent[0][1].messages[0].tool_calls[0].extra_content.google.thought_signature, 'skip_thought_signature_validator');
+  assert.equal(sent[1][1].messages[0].tool_calls[0].extra_content, undefined); // Groq gets the app's calls as they are
+});
